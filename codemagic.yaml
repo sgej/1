@@ -1,0 +1,80 @@
+workflows:
+  ios_build:
+    name: iOS Build (Xcode) - unsigned IPA
+    max_build_duration: 120
+
+    environment:
+      xcode: latest
+      cocoapods: default
+
+      vars:
+        PROJECT: ""        # 填 .xcodeproj 文件名，例如 MyApp.xcodeproj（或留空并使用 WORKSPACE）
+        WORKSPACE: ""      # 填 .xcworkspace 名称（若使用 CocoaPods 或 workspace）
+        SCHEME: ""         # Xcode scheme 名称（必填）
+
+    triggering:
+      events:
+        - push
+        - pull_request
+      branch_patterns:
+        - pattern: main
+          include: true
+
+    scripts:
+      - name: Prepare
+        script: |
+          set -e
+          echo "PROJECT=$PROJECT"
+          echo "WORKSPACE=$WORKSPACE"
+          echo "SCHEME=$SCHEME"
+
+      - name: Install CocoaPods if needed
+        script: |
+          if [ -f Podfile ]; then
+            pod repo update
+            pod install --silent
+          fi
+
+      - name: Clean previous builds
+        script: |
+          rm -rf build
+          mkdir -p build
+
+      - name: Archive (xcodebuild archive)
+        script: |
+          set -e
+          ARCHIVE_PATH="build/${SCHEME}.xcarchive"
+          if [ -n "$WORKSPACE" ]; then
+            echo "Using workspace: $WORKSPACE"
+            xcodebuild archive -workspace "$WORKSPACE" -scheme "$SCHEME" -configuration Release -archivePath "$ARCHIVE_PATH" -destination "generic/platform=iOS"
+          elif [ -n "$PROJECT" ]; then
+            echo "Using project: $PROJECT"
+            xcodebuild archive -project "$PROJECT" -scheme "$SCHEME" -configuration Release -archivePath "$ARCHIVE_PATH" -destination "generic/platform=iOS"
+          else
+            echo "ERROR: PROJECT or WORKSPACE must be set."
+            exit 1
+          fi
+
+      - name: Package unsigned IPA
+        script: |
+          set -e
+          ARCHIVE_PATH="build/${SCHEME}.xcarchive"
+          APP_PATH=$(find "$ARCHIVE_PATH/Products/Applications" -name "*.app" | head -n1 || true)
+          if [ -z "$APP_PATH" ]; then
+            echo "[ERROR] .app not found in archive: $ARCHIVE_PATH/Products/Applications"
+            ls -la "$ARCHIVE_PATH"
+            exit 1
+          fi
+          echo "Found app: $APP_PATH"
+          mkdir -p build/ipa/Payload
+          cp -R "$APP_PATH" build/ipa/Payload/
+          pushd build/ipa > /dev/null
+          ZIP_NAME="${SCHEME}-unsigned.ipa"
+          /usr/bin/zip -r ../"$ZIP_NAME" Payload > /dev/null
+          popd > /dev/null
+          mv "${ZIP_NAME}" build/ipa/ || true
+          echo "Unsigned IPA created: build/ipa/${SCHEME}-unsigned.ipa"
+
+    artifacts:
+      - build/ipa/*.ipa
+      - build/*.xcarchive
