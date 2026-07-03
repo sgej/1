@@ -7,6 +7,12 @@ workflows:
       xcode: latest
       cocoapods: default
 
+      vars:
+        PROJECT: ""        # 填 .xcodeproj 文件名，例如 MyApp.xcodeproj（或留空并使用 WORKSPACE）
+        WORKSPACE: ""      # 填 .xcworkspace 名称（若使用 CocoaPods 或 workspace）
+        SCHEME: ""         # Xcode scheme 名称（必填）
+        EXPORT_METHOD: "app-store" # app-store / ad-hoc / development / enterprise
+
     triggering:
       events:
         - push
@@ -14,16 +20,6 @@ workflows:
       branch_patterns:
         - pattern: main
           include: true
-
-    variables:
-      PROJECT:
-        value: ""        # 填 .xcodeproj 文件名，例如 MyApp.xcodeproj（或留空并使用 WORKSPACE）
-      WORKSPACE:
-        value: ""        # 填 .xcworkspace 名称（若使用 CocoaPods 或 workspace）
-      SCHEME:
-        value: ""        # Xcode scheme 名称（必填）
-      EXPORT_METHOD:
-        value: "app-store" # app-store / ad-hoc / development / enterprise
 
     scripts:
       - name: Prepare
