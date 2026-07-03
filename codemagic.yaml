@@ -1,0 +1,107 @@
+workflows:
+  ios_build_debug:
+    name: iOS Build (Xcode) - debug (unsigned IPA)
+    max_build_duration: 120
+
+    environment:
+      xcode: latest
+      cocoapods: default
+
+      vars:
+        PROJECT: ""        # 如果有 .xcodeproj：填 MyApp.xcodeproj，否则留空
+        WORKSPACE: ""      # 如果使用 CocoaPods：填 MyApp.xcworkspace，否则留空
+        SCHEME: ""         # Xcode scheme 名称（必填，或在 Codemagic UI 设置）
+
+    triggering:
+      events:
+        - push
+        - pull_request
+      branch_patterns:
+        - pattern: main
+          include: true
+
+    scripts:
+      - name: Debug: list repo and schemes
+        script: |
+          set -e
+          echo "=== Working dir: $(pwd) ==="
+          echo "--- top-level files ---"
+          ls -la || true
+          echo "--- find .xcodeproj/.xcworkspace/Podfile (maxdepth 4) ---"
+          find . -maxdepth 4 \( -name "*.xcodeproj" -o -name "*.xcworkspace" -o -name "Podfile" \) -print || true
+
+          echo "--- show Podfile content (if exists) ---"
+          if [ -f Podfile ]; then
+            echo "---- Podfile start ----"
+            sed -n '1,200p' Podfile || true
+            echo "---- Podfile end ----"
+          else
+            echo "No Podfile at repo root"
+          fi
+
+          echo "--- listing schemes in projects/workspaces found ---"
+          for p in $(find . -maxdepth 4 -name "*.xcodeproj"); do
+            echo "Schemes in $p:"
+            xcodebuild -list -project "$p" || true
+          done
+          for w in $(find . -maxdepth 4 -name "*.xcworkspace"); do
+            echo "Schemes in $w:"
+            xcodebuild -list -workspace "$w" || true
+          done
+
+      - name: Install CocoaPods if needed
+        script: |
+          if [ -f Podfile ]; then
+            pod repo update
+            pod install --silent
+          fi
+
+      - name: Clean previous builds
+        script: |
+          rm -rf build
+          mkdir -p build
+
+      - name: Archive (xcodebuild archive)
+        script: |
+          set -e
+          ARCHIVE_PATH="build/${SCHEME}.xcarchive"
+          if [ -n "$WORKSPACE" ]; then
+            echo "Using workspace: $WORKSPACE"
+            xcodebuild archive -workspace "$WORKSPACE" -scheme "$SCHEME" -configuration Release -archivePath "$ARCHIVE_PATH" -destination "generic/platform=iOS"
+          elif [ -n "$PROJECT" ]; then
+            echo "Using project: $PROJECT"
+            xcodebuild archive -project "$PROJECT" -scheme "$SCHEME" -configuration Release -archivePath "$ARCHIVE_PATH" -destination "generic/platform=iOS"
+          else
+            echo "ERROR: PROJECT or WORKSPACE must be set."
+            exit 1
+          fi
+
+      - name: Package unsigned IPA
+        script: |
+          set -e
+          ARCHIVE_PATH="build/${SCHEME}.xcarchive"
+          echo "Archive path: $ARCHIVE_PATH"
+          if [ ! -d "$ARCHIVE_PATH" ]; then
+            echo "[ERROR] Archive not found: $ARCHIVE_PATH"
+            ls -la build || true
+            exit 1
+          fi
+          APP_PATH=$(find "$ARCHIVE_PATH/Products/Applications" -name "*.app" | head -n1 || true)
+          if [ -z "$APP_PATH" ]; then
+            echo "[ERROR] .app not found in archive: $ARCHIVE_PATH/Products/Applications"
+            find "$ARCHIVE_PATH" -maxdepth 3 -type d -print || true
+            exit 1
+          fi
+          echo "Found app: $APP_PATH"
+          mkdir -p build/ipa/Payload
+          cp -R "$APP_PATH" build/ipa/Payload/
+          pushd build/ipa > /dev/null
+          ZIP_NAME="${SCHEME}-unsigned.ipa"
+          /usr/bin/zip -r ../"$ZIP_NAME" Payload > /dev/null
+          popd > /dev/null
+          mv "${ZIP_NAME}" build/ipa/ || true
+          echo "Unsigned IPA created: build/ipa/${SCHEME}-unsigned.ipa"
+
+    artifacts:
+      - build/ipa/*.ipa
+      - build/*.xcarchive
