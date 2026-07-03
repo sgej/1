@@ -1,0 +1,159 @@
+name: iOS Xcode Build — unsigned IPA
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      project:
+        description: '可选：.xcodeproj 路径（相对仓库根），例如 MyApp.xcodeproj'
+        required: false
+        default: ''
+      workspace:
+        description: '可选：.xcworkspace 路径（相对仓库根），例如 MyApp.xcworkspace'
+        required: false
+        default: ''
+      scheme:
+        description: '可选但推荐：Xcode scheme 名称'
+        required: false
+        default: ''
+
+jobs:
+  build-ios-unsigned:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Debug: list repo top-level and find projects
+        run: |
+          set -e
+          echo "PWD: $(pwd)"
+          echo "=== top-level files ==="
+          ls -la
+          echo "=== searching for .xcworkspace and .xcodeproj (maxdepth 4) ==="
+          find . -maxdepth 4 -type d \( -name "*.xcworkspace" -o -name "*.xcodeproj" \) -print || true
+
+      - name: Detect project/workspace and scheme (auto or from inputs)
+        id: detect
+        run: |
+          set -e
+          echo "Inputs: project='${{ github.event.inputs.project }}' workspace='${{ github.event.inputs.workspace }}' scheme='${{ github.event.inputs.scheme }}'"
+          # If workflow_dispatch inputs provided, use them; otherwise try to auto-detect
+          if [ -n "${{ github.event.inputs.project }}" ]; then
+            echo "PROJECT=${{ github.event.inputs.project }}" >> $GITHUB_ENV
+          fi
+          if [ -n "${{ github.event.inputs.workspace }}" ]; then
+            echo "WORKSPACE=${{ github.event.inputs.workspace }}" >> $GITHUB_ENV
+          fi
+          if [ -n "${{ github.event.inputs.scheme }}" ]; then
+            echo "SCHEME=${{ github.event.inputs.scheme }}" >> $GITHUB_ENV
+          fi
+
+          # Auto-detect if not provided
+          if [ -z "${PROJECT}" ] && [ -z "${WORKSPACE}" ]; then
+            PROJ=$(find . -maxdepth 4 -name "*.xcodeproj" | head -n1 || true)
+            WORK=$(find . -maxdepth 4 -name "*.xcworkspace" | head -n1 || true)
+            if [ -n "$WORK" ]; then
+              echo "Auto-detected workspace: $WORK"
+              echo "WORKSPACE=$WORK" >> $GITHUB_ENV
+            elif [ -n "$PROJ" ]; then
+              echo "Auto-detected project: $PROJ"
+              echo "PROJECT=$PROJ" >> $GITHUB_ENV
+            else
+              echo "No .xcodeproj or .xcworkspace found in repo (within maxdepth 4)."
+            fi
+          fi
+
+          # If scheme not provided, try to list schemes from detected project/workspace
+          if [ -z "${SCHEME}" ]; then
+            echo "SCHEME not provided — attempting to list schemes for discovered project/workspace..."
+            if [ -n "${WORKSPACE}" ]; then
+              echo "xcodebuild -list -workspace ${WORKSPACE} || true"
+              xcodebuild -list -workspace "${WORKSPACE}" || true
+            elif [ -n "${PROJECT}" ]; then
+              echo "xcodebuild -list -project ${PROJECT} || true"
+              xcodebuild -list -project "${PROJECT}" || true
+            else
+              echo "No project/workspace known; cannot list schemes."
+            fi
+            echo "Please set the SCHEME input when running the workflow if auto-detection didn't find it."
+          else
+            echo "Using SCHEME=${SCHEME}"
+          fi
+
+      - name: Prepare build variables
+        run: |
+          set -e
+          echo "PROJECT=$PROJECT"
+          echo "WORKSPACE=$WORKSPACE"
+          echo "SCHEME=$SCHEME"
+          if [ -z "$SCHEME" ]; then
+            echo "ERROR: SCHEME is empty. Provide scheme via workflow inputs or ensure xcodebuild -list shows your scheme."
+            exit 1
+          fi
+
+      - name: Install cocoapods (if Podfile present)
+        if: always()
+        run: |
+          if [ -f Podfile ]; then
+            echo "Podfile detected — installing pods"
+            sudo gem install cocoapods -v '~> 1.14' --no-document || true
+            pod repo update || true
+            pod install --silent || true
+          else
+            echo "No Podfile detected"
+          fi
+
+      - name: Archive (xcodebuild archive)
+        run: |
+          set -e
+          ARCHIVE_PATH="build/${SCHEME}.xcarchive"
+          echo "Archiving to $ARCHIVE_PATH"
+          if [ -n "$WORKSPACE" ]; then
+            echo "Using workspace: $WORKSPACE"
+            xcodebuild archive -workspace "$WORKSPACE" -scheme "$SCHEME" -configuration Release -archivePath "$ARCHIVE_PATH" -destination "generic/platform=iOS"
+          elif [ -n "$PROJECT" ]; then
+            echo "Using project: $PROJECT"
+            xcodebuild archive -project "$PROJECT" -scheme "$SCHEME" -configuration Release -archivePath "$ARCHIVE_PATH" -destination "generic/platform=iOS"
+          else
+            echo "ERROR: neither WORKSPACE nor PROJECT is set. Aborting."
+            exit 1
+          fi
+
+      - name: Verify archive contents
+        run: |
+          set -e
+          ARCHIVE_PATH="build/${SCHEME}.xcarchive"
+          echo "Archive dir listing:"
+          ls -la "$ARCHIVE_PATH" || true
+          echo "Searching for .app inside archive"
+          find "$ARCHIVE_PATH" -maxdepth 5 -type d -name "*.app" -print || true
+
+      - name: Package unsigned IPA
+        run: |
+          set -e
+          ARCHIVE_PATH="build/${SCHEME}.xcarchive"
+          APP_PATH=$(find "$ARCHIVE_PATH/Products/Applications" -name "*.app" | head -n1 || true)
+          if [ -z "$APP_PATH" ]; then
+            echo "[ERROR] .app not found in archive path: $ARCHIVE_PATH/Products/Applications"
+            find "$ARCHIVE_PATH" -maxdepth 5 -print || true
+            exit 1
+          fi
+          echo "Found app: $APP_PATH"
+          mkdir -p build/ipa/Payload
+          cp -R "$APP_PATH" build/ipa/Payload/
+          pushd build/ipa > /dev/null
+          ZIP_NAME="${SCHEME}-unsigned.ipa"
+          /usr/bin/zip -r ../"$ZIP_NAME" Payload > /dev/null
+          popd > /dev/null
+          mv "${ZIP_NAME}" build/ipa/ || true
+          echo "Unsigned IPA created: build/ipa/${SCHEME}-unsigned.ipa"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-unsigned
+          path: |
+            build/ipa/*.ipa
+            build/*.xcarchive
